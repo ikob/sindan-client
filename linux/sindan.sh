@@ -1,4 +1,1524 @@
 #!/bin/bash
+# sindan.sh
+# version 2.2.11
+VERSION="2.2.11"
+
+# read configurationfile
+. ./sindan.conf
+
+#
+# functions
+#
+
+## for initial
+#
+cleate_uuid() {
+  uuidgen
+}
+
+#
+hash_result() {
+  if [ $# -ne 2 ]; then
+    echo "ERROR: hash_result <type> <src>." 1>&2
+    return 1
+  fi
+  type="$1"
+  src="$2"
+  case "$type" in
+    "ssid"|"bssid")
+      if [ "$LOCAL_NETWORK_PRIVACY" = "yes" ]; then
+        echo "$(echo "$src" | $CMD_HASH | cut -d' ' -f1):SHA1"
+      else
+        echo "$src"
+      fi
+      ;;
+    "environment")
+      # XXX do something if "$LOCAL_NETWORK_PRIVACY" = "yes".
+      if [ "$LOCAL_NETWORK_PRIVACY" = "yes" ] ; then
+        echo 'XXX'
+      else
+        echo "$src"
+      fi
+      ;;
+    "mac_addr")
+      if [ "$CLIENT_PRIVACY" = "yes" ] ; then
+        echo "$(echo "$src" | $CMD_HASH | cut -d' ' -f1):SHA1"
+      else
+        echo "$src"
+      fi
+      ;;
+    "v4autoconf"|"v6autoconf")
+      # XXX do something if "$CLIENT_PRIVACY" = "yes".
+      if [ "$CLIENT_PRIVACY" = "yes" ] ; then
+        echo 'XXX'
+      else
+        echo "$src"
+      fi
+      ;;
+    *) echo "$src" ;;
+  esac
+}
+
+#
+write_json_campaign() {
+  if [ $# -ne 4 ]; then
+    echo "ERROR: write_json_campaign <uuid> <mac_addr> <os> <ssid>." 1>&2
+    echo "DEBUG(input data): $1, $2, $3, $4" 1>&2
+    return 1
+  fi
+  local mac_addr; local ssid
+  mac_addr=$(hash_result mac_addr "$2")
+  ssid=$(hash_result ssid "$4")
+  echo "{ \"log_campaign_uuid\" : \"$1\","				\
+       "\"mac_addr\" : \"$mac_addr\","					\
+       "\"os\" : \"$3\","						\
+       "\"ssid\" : \"$ssid\","						\
+       "\"version\" : \"$VERSION\","					\
+       "\"occurred_at\" : \"$(date -u '+%Y-%m-%d %T')\" }"		\
+  > log/campaign_"$(date -u '+%s')".json
+  return $?
+}
+
+#
+write_json() {
+  if [ $# -ne 7 ]; then
+    echo "ERROR: write_json <layer> <group> <type> <result> <target>"	\
+         "<detail> <count>. ($4)" 1>&2
+    echo "DEBUG(input data): $1, $2, $3, $4, $5, $6, $7" 1>&2
+    return 1
+  fi
+  local detail
+  detail=$(hash_result "$3" "$6")
+  echo "{ \"layer\" : \"$1\","						\
+       "\"log_group\" : \"$2\","					\
+       "\"log_type\" : \"$3\","						\
+       "\"log_campaign_uuid\" : \"$UUID\","				\
+       "\"result\" : \"$4\","						\
+       "\"target\" : \"$5\","						\
+       "\"detail\" : \"$detail\","					\
+       "\"occurred_at\" : \"$(date -u '+%Y-%m-%d %T')\" }"		\
+  > log/sindan_"$1"_"$3"_"$7"_"$(date -u '+%s')".json
+  return $?
+}
+
+## for datalink layer
+#
+get_devicename() {
+  echo "$DEVNAME"
+  return $?
+}
+
+#
+do_ifdown() {
+  if [ $# -ne 1 ]; then
+    echo "ERROR: do_ifdown <devicename>." 1>&2
+    return 1
+  fi
+  ifdown "$1"
+  return $?
+}
+
+#
+do_ifup() {
+  if [ $# -ne 1 ]; then
+    echo "ERROR: do_ifup <devicename>." 1>&2
+    return 1
+  fi
+  ifup "$1"
+  return $?
+}
+
+#
+get_os() {
+  if which lsb_release > /dev/null 2>&1; then
+    lsb_release -ds
+  else
+    grep PRETTY_NAME /etc/*-release					|
+    awk -F\" '{print $2}'
+  fi
+  return $?
+}
+
+#
+get_ifstatus() {
+  if [ $# -ne 1 ]; then
+    echo "ERROR: get_ifstatus <devicename>." 1>&2
+    return 1
+  fi
+  local status
+  status=$(cat /sys/class/net/"$1"/operstate)
+  if [ "$status" = "up" ]; then
+    echo "$status"; return 0
+  else
+    echo "$status"; return 1
+  fi
+}
+
+#
+get_ifmtu() {
+  if [ $# -ne 1 ]; then
+    echo "ERROR: get_ifmtu <devicename>." 1>&2
+    return 1
+  fi
+  cat /sys/class/net/"$1"/mtu
+  return $?
+}
+
+#
+get_macaddr() {
+  if [ $# -ne 1 ]; then
+    echo "ERROR: get_macaddr <devicename>." 1>&2
+    return 1
+  fi
+  < /sys/class/net/"$1"/address	tr "[:upper:]" "[:lower:]"
+  return $?
+}
+
+#
+get_mediatype() {
+  if [ $# -ne 1 ]; then
+    echo "ERROR: get_mediatype <devicename>." 1>&2
+    return 1
+  fi
+  local speed; local duplex
+  speed=$(cat /sys/class/net/"$1"/speed)
+  duplex=$(cat /sys/class/net/"$1"/duplex)
+  echo "${speed}_${duplex}"
+  return $?
+}
+
+#
+get_wifi_ssid() {
+  if [ $# -ne 1 ]; then
+    echo "ERROR: get_wifi_ssid <devicename>." 1>&2
+    return 1
+  fi
+  iwgetid "$1" --raw
+  return $?
+}
+
+#
+get_wifi_bssid() {
+  if [ $# -ne 1 ]; then
+    echo "ERROR: get_wifi_bssid <devicename>." 1>&2
+    return 1
+  fi
+  iwgetid "$1" --raw --ap						|
+  tr "[:upper:]" "[:lower:]"
+  return $?
+}
+
+#
+get_wifi_apoui() {
+  if [ $# -ne 1 ]; then
+    echo "ERROR: get_wifi_bssid <devicename>." 1>&2
+    return 1
+  fi
+  iwgetid "$1" --raw --ap						|
+  cut -d: -f1-3								|
+  tr "[:upper:]" "[:lower:]"
+  return $?
+}
+
+#
+get_wifi_channel() {
+  if [ $# -ne 1 ]; then
+    echo "ERROR: get_wifi_channel <devicename>." 1>&2
+    return 1
+  fi
+  iwgetid "$1" --raw --channel
+  return $?
+}
+
+#
+get_wifi_rssi() {
+  if [ $# -ne 1 ]; then
+    echo "ERROR: get_wifi_rssi <devicename>." 1>&2
+    return 1
+  fi
+  grep "$1" /proc/net/wireless						|
+  awk '{print $4}'
+  return $?
+}
+
+#
+get_wifi_noise() {
+  if [ $# -ne 1 ]; then
+    echo "ERROR: get_wifi_noise <devicename>." 1>&2
+    return 1
+  fi
+  grep "$1" /proc/net/wireless						|
+  awk '{print $5}'
+  return $?
+}
+
+#
+get_wifi_quality() {
+  if [ $# -ne 1 ]; then
+    echo "ERROR: get_wifi_quality <devicename>." 1>&2
+    return 1
+  fi
+  iwconfig "$1"								|
+  sed -n 's/^.*Link Quality=\([0-9\/]*\).*$/\1/p'
+  return $?
+}
+
+#
+get_wifi_rate() {
+  if [ $# -ne 1 ]; then
+    echo "ERROR: get_wifi_rate <devicename>." 1>&2
+    return 1
+  fi
+  iwconfig "$1"								|
+  sed -n 's/^.*Bit Rate=\([0-9.]*\) Mb\/s.*$/\1/p'
+  return $?
+}
+
+#
+get_wifi_environment() {
+  if [ $# -ne 1 ]; then
+    echo "ERROR: get_wifi_environment <devicename>." 1>&2
+    return 1
+  fi
+  echo "BSSID,Protocol,SSID,Quality,RSSI,Noise,BitRates"
+  iwlist "$1" scanning							|
+  awk 'BEGIN {								#
+    find=0								#
+  } {									#
+    while (getline line) {						#
+      if (find==1) {							#
+        if (match(line,/Protocol:.*/)) {				#
+          split(line,a,":")						#
+          printf ",%s", a[2]						#
+        } else if (match(line,/ESSID:.*/)) {				#
+          split(line,a,"\"")						#
+          printf ",%s", a[2]						#
+        } else if (match(line,/Channel [0-9]*/)) {			#
+          split(substr(line,RSTART,RLENGTH),a," ")			#
+          printf ",%s", a[2]						#
+        } else if (match(line,/Quality=.*/)) {				#
+          gsub(/=/," ",line)						#
+          split(line,a," ")						#
+          printf ",%s,%s,%s", a[2], a[5], a[9]				#
+        } else if (match(line,/Rates:[0-9.]* /)) {			#
+          split(substr(line,RSTART,RLENGTH),a,":")			#
+          printf ",%s\n", a[2]						#
+          find=0							#
+        }								#
+      } else if (match(line,/Address:.*/)) {				#
+        split(substr(line,RSTART,RLENGTH),a," ")			#
+        printf "%s", tolower(a[2])					#
+        find=1								#
+      }									#
+    }									#
+  }'
+  return $?
+}
+
+## for interface layer
+#
+get_v4ifconf() {
+  if [ $# -ne 1 ]; then
+    echo "ERROR: get_v4ifconf <devicename>." 1>&2
+    return 1
+  fi
+  if [ -f /etc/dhcpcd.conf ]; then
+    if grep "^interface $1" /etc/dhcpcd.conf > /dev/null 2>&1; then
+      echo 'manual'
+    else
+      echo 'dhcp'
+    fi
+  else
+    grep "^iface $1 inet" /etc/network/interfaces			|
+    awk '{print $4}'
+  fi
+  return $?
+}
+
+#
+get_v4addr() {
+  if [ $# -ne 1 ]; then
+    echo "ERROR: get_v4addr <devicename>." 1>&2
+    return 1
+  fi
+  ip -4 addr show "$1"							|
+  sed -n 's/^.*inet \([0-9.]*\)\/.*$/\1/p'
+  return $?
+}
+
+#
+get_netmask() {
+  if [ $# -ne 1 ]; then
+    echo "ERROR: get_netmask <devicename>." 1>&2
+    return 1
+  fi
+  local plen; local dec
+  plen=$(ip -4 addr show "$1"						|
+       sed -n 's/^.*inet [0-9.]*\/\([0-9]*\) .*$/\1/p')
+  dec=$(( 0xFFFFFFFF ^ ((2 ** (32 - plen)) - 1) ))
+  echo "$(( dec >> 24 )).$(( (dec >> 16) & 0xFF ))."			\
+       "$(( (dec >> 8) & 0xFF )).$(( dec & 0xFF ))"			|
+  sed 's/ //g'
+  return $?
+}
+
+#
+check_v4autoconf() {
+  if [ $# -ne 2 ]; then
+    echo "ERROR: check_v4autoconf <devicename> <v4ifconf>." 1>&2
+    return 1
+  fi
+  if [ "$2" = "dhcp" ]; then
+    local v4addr; local dhcp_data=""; local dhcpv4addr; local cmp
+    v4addr=$(get_v4addr "$1")
+    if which dhcpcd > /dev/null 2>&1; then
+      dhcp_data=$(dhcpcd -4 -U "$1" | sed "s/'//g")
+    else
+      dhcp_data=$(sed 's/"//g' /var/lib/dhcp/dhclient."$1".leases)
+    fi
+    echo "$dhcp_data"
+
+    # simple comparision
+    dhcpv4addr=$(echo "$dhcp_data"					|
+               sed -n 's/^ip_address=\([0-9.]*\)/\1/p')
+    if [ -z "$dhcpv4addr" ] || [ -z "$v4addr" ]; then
+      return 1
+    fi
+    cmp=$(compare_v4addr "$dhcpv4addr" "$v4addr")
+    if [ "$cmp" = "same" ]; then
+      return 0
+    else
+      return 1
+    fi
+  fi
+  echo "v4conf is $2"
+  return 0
+}
+
+#
+get_v4routers() {
+  if [ $# -ne 1 ]; then
+    echo "ERROR: get_v4routers <devicename>." 1>&2
+    return 1
+  fi
+  ip -4 route show dev "$1"						|
+  sed -n 's/^default via \([0-9.]*\).*$/\1/p'
+  return $?
+}
+
+#
+get_v4nameservers() {
+  sed -n 's/^nameserver \([0-9.]*\)$/\1/p' /etc/resolv.conf		|
+  awk -v ORS=',' '1; END {printf "\n"}'					|
+  sed 's/,$//'
+  return $?
+}
+
+#
+ip2decimal() {
+  if [ $# -ne 1 ]; then
+    echo "ERROR: ip2decimal <v4addr>." 1>&2
+    return 1
+  fi
+  local o=()
+  o=($(echo "$1" | sed 's/\./ /g'))
+  echo $(( (o[0] << 24) | (o[1] << 16) | (o[2] << 8) | o[3] ))
+}
+
+#
+compare_v4addr() {
+  if [ $# -ne 2 ]; then
+    echo "ERROR: compare_v4addr <v4addr1> <v4addr2>." 1>&2
+    return 1
+  fi
+  local addr1; local addr2
+  addr1=$(ip2decimal "$1")
+  addr2=$(ip2decimal "$2")
+  if [ "$addr1" = "$addr2" ]; then
+    echo 'same'
+  else
+    echo 'diff'
+  fi
+}
+
+#
+check_v4addr() {
+  if [ $# -ne 1 ]; then
+    echo "ERROR: check_v4addr <v4addr>." 1>&2
+    return 1
+  fi
+  if echo "$1"								|
+   grep -vE '^(([1-9]?[0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([1-9]?[0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])$' > /dev/null; then
+    echo 'not IP address'
+    return 1
+  elif echo "$1" | grep '^127\.' > /dev/null; then
+    echo 'loopback'
+    return 0
+  elif echo "$1" | grep '^169\.254' > /dev/null; then
+    echo 'linklocal'
+    return 0
+  elif echo "$1"							|
+   grep -e '^10\.' -e '^172\.\(1[6-9]\|2[0-9]\|3[01]\)\.' -e '^192\.168\.' > /dev/null; then
+    echo 'private'
+    return 0
+  else
+    echo 'grobal'
+    return 0
+  fi
+  return 1
+}
+
+#
+get_v6ifconf() {
+  if [ $# -ne 1 ]; then
+    echo "ERROR: get_v6ifconf <devicename>." 1>&2
+    return 1
+  fi
+  ## TODO: support netplan
+  local v6ifconf
+  v6ifconf=$(grep "$1 inet6" /etc/network/interfaces			|	
+           awk '{print $4}')
+  if [ -n "$v6ifconf" ]; then
+    echo "$v6ifconf"
+  else
+    echo "automatic"
+  fi
+  return $?
+}
+
+#
+get_v6lladdr() {
+  if [ $# -ne 1 ]; then
+    echo "ERROR: get_v6lladdr <devicename>." 1>&2
+    return 1
+  fi
+  ip -6 addr show "$1" scope link					|
+  sed -n 's/^.*inet6 \(fe80[0-9a-f:]*\)\/.*$/\1/p'
+  return $?
+}
+
+#
+get_ra_info() {
+  if [ $# -ne 1 ]; then
+    echo "ERROR: get_ra_info <devicename>." 1>&2
+    return 1
+  fi
+  rdisc6 -n "$1"
+  return $?
+}
+
+#
+get_ra_addrs() {
+  # require get_ra_info() data from STDIN.
+  grep '^ from'								|
+  awk '{print $2}'							|
+  uniq									|
+  awk -F\n -v ORS=',' '{print}'						|
+  sed 's/,$//'
+  return $?
+}
+
+#
+get_ra_flags() {
+  # require get_ra_info() data from STDIN.
+  if [ $# -ne 1 ]; then
+    echo "ERROR: get_ra_flags <ra_source>." 1>&2
+    return 1
+  fi
+  awk -v src="$1" 'BEGIN {						#
+    flags=""								#
+  } {									#
+    while (getline line) {						#
+      if (match(line,/^Stateful address conf./)				\
+          && match(line,/Yes/)) {					#
+        flags=flags "M"							#
+      } else if (match(line,/^Stateful other conf./)			\
+                 && match(line,/Yes/)) {				#
+        flags=flags "O"							#
+      } else if (match(line,/^Mobile home agent/)			\
+                 && match(line,/Yes/)) {				#
+        flags=flags "H"							#
+      } else if (match(line,/^Router preference/)) {			#
+        if (match(line,/low/)) {					#
+          flags=flags "l"						#
+        } else if (match(line,/medium/)) {				#
+          flags=flags "m"						#
+        } else if (match(line,/high/)) {				#
+          flags=flags "h"						#
+        }								#
+      } else if (match(line,/^Neighbor discovery proxy/)		\
+                 && match(line,/Yes/)) {				#
+        flags=flags "P"							#
+      } else if (match(line,/^ from.*/)) {				#
+        if (line ~ src) {						#
+          exit								#
+        } else {							#
+          flags=""							#
+        }								#
+      }									#
+    }									#
+  } END {								#
+    printf "%s", flags							#
+  }'
+  return $?
+}
+
+#
+get_ra_hlim() {
+  # require get_ra_info() data from STDIN.
+  if [ $# -ne 1 ]; then
+    echo "ERROR: get_ra_hlim <ra_source>." 1>&2
+    return 1
+  fi
+  awk -v src="$1" 'BEGIN {						#
+    hops=""								#
+  } {									#
+    while (getline line) {						#
+      if (match(line,/^Hop limit/)) {					#
+        split(line,h," ")						#
+        hops=h[4]							#
+      } else if (match(line,/^ from.*/)) {				#
+        if (line ~ src) {						#
+          exit								#
+        } else {							#
+          hops=""							#
+        }								#
+      }									#
+    }									#
+  } END {								#
+    printf "%s", hops							#
+  }'
+  return $?
+}
+
+#
+get_ra_ltime() {
+  # require get_ra_info() data from STDIN.
+  if [ $# -ne 1 ]; then
+    echo "ERROR: get_ra_ltime <ra_source>." 1>&2
+    return 1
+  fi
+  awk -v src="$1" 'BEGIN {						#
+    time=""								#
+  } {									#
+    while (getline line) {						#
+      if (match(line,/^Router lifetime/)) {				#
+        split(line,t," ")						#
+        time=t[4]							#
+      } else if (match(line,/^ from.*/)) {				#
+        if (line ~ src) {						#
+          exit								#
+        } else {							#
+          time=""							#
+        }								#
+      }									#
+    }									#
+  } END {								#
+    printf "%s", time							#
+  }'
+  return $?
+}
+
+#
+get_ra_reach() {
+  # require get_ra_info() data from STDIN.
+  if [ $# -ne 1 ]; then
+    echo "ERROR: get_ra_reach <ra_source>." 1>&2
+    return 1
+  fi
+  awk -v src="$1" 'BEGIN {						#
+    time=""								#
+  } {									#
+    while (getline line) {						#
+      if (match(line,/^Reachable time/)) {				#
+        split(line,t," ")						#
+        time=t[4]							#
+      } else if (match(line,/^ from.*/)) {				#
+        if (line ~ src) {						#
+          exit								#
+        } else {							#
+          time=""							#
+        }								#
+      }									#
+    }									#
+  } END {								#
+    printf "%s", time							#
+  }'
+  return $?
+}
+
+#
+get_ra_retrans() {
+  # require get_ra_info() data from STDIN.
+  if [ $# -ne 1 ]; then
+    echo "ERROR: get_ra_retrans <ra_source>." 1>&2
+    return 1
+  fi
+  awk -v src="$1" 'BEGIN {						#
+    time=""								#
+  } {									#
+    while (getline line) {						#
+      if (match(line,/^Retransmit time/)) {				#
+        split(line,t," ")						#
+        time=t[4]							#
+      } else if (match(line,/^ from.*/)) {				#
+        if (line ~ src) {						#
+          exit								#
+        } else {							#
+          time=""							#
+        }								#
+      }									#
+    }									#
+  } END {								#
+    printf "%s", time							#
+  }'
+  return $?
+}
+
+#
+get_ra_prefs() {
+  # require get_ra_info() data from STDIN.
+  if [ $# -ne 1 ]; then
+    echo "ERROR: get_ra_prefs <ra_source>." 1>&2
+    return 1
+  fi
+  awk -v src="$1" 'BEGIN {						#
+    prefs=""								#
+  } {									#
+    while (getline line) {						#
+      if (match(line,/^ Prefix/)) {					#
+        split(line,p," ")						#
+        prefs=prefs ","p[3]						#
+      } else if (match(line,/^ from.*/)) {				#
+        if (line ~ src) {						#
+          exit								#
+        } else {							#
+          prefs=""							#
+        }								#
+      }									#
+    }									#
+  } END {								#
+    printf "%s", prefs							#
+  }'									|
+  sed 's/^,//'
+  return $?
+}
+
+#
+get_ra_pref_flags() {
+  # require get_ra_info() data from STDIN.
+  if [ $# -ne 2 ]; then
+    echo "ERROR: get_ra_pref_flags <ra_source> <ra_pref>." 1>&2
+    return 1
+  fi
+  awk -v src="$1" -v pref="$2" 'BEGIN {					#
+    find=0								#
+    flags=""								#
+    split(pref,p,"/")							#
+  } {									#
+    while (getline line) {						#
+      if (find==1) {							#
+        if (match(line,/^  On-link/) && match(line,/Yes/)) {		#
+          flags=flags "L"						#
+        } else if (match(line,/^  Autonomous address conf./)		\
+                   && match(line,/Yes/)) {				#
+          flags=flags "A"						#
+        } else if (match(line,/^  Pref. time/)) {			#
+          find=0							#
+        }								#
+      } else if (match(line,/^ Prefix/) && line ~ p[1]) {		#
+        find=1								#
+      } else if (match(line,/^ from.*/)) {				#
+        if (line ~ src) {						#
+          exit								#
+        } else {							#
+          flags=""							#
+        }								#
+      }									#
+    }									#
+  } END {								#
+    printf "%s", flags							#
+  }'
+  return $?
+}
+
+#
+get_ra_pref_vltime() {
+  # require get_ra_info() data from STDIN.
+  if [ $# -ne 2 ]; then
+    echo "ERROR: get_ra_pref_vltime <ra_source> <ra_pref>." 1>&2
+    return 1
+  fi
+  awk -v src="$1" -v pref="$2" 'BEGIN {					#
+    find=0								#
+    time=""								#
+    split(pref,p,"/")							#
+  } {									#
+    while (getline line) {						#
+      if (find==1) {							#
+        if (match(line,/^  Valid time/)) {				#
+          split(line,t," ")						#
+          time=t[4]							#
+          find=0							#
+        }								#
+      } else if (match(line,/^ Prefix/) && line ~ p[1]) {		#
+        find=1								#
+      } else if (match(line,/^ from.*/)) {				#
+        if (line ~ src) {						#
+          exit								#
+        } else {							#
+          flags=""							#
+        }								#
+      }									#
+    }									#
+  } END {								#
+    printf "%s", time							#
+  }'
+  return $?
+}
+
+#
+get_ra_pref_pltime() {
+  # require get_ra_info() data from STDIN.
+  if [ $# -ne 2 ]; then
+    echo "ERROR: get_ra_pref_pltime <ra_source> <ra_pref>." 1>&2
+    return 1
+  fi
+  awk -v src="$1" -v pref="$2" 'BEGIN {					#
+    find=0								#
+    time=""								#
+    split(pref,p,"/")							#
+  } {									#
+    while (getline line) {						#
+      if (find==1) {							#
+        if (match(line,/^  Pref. time/)) {				#
+          split(line,t," ")						#
+          time=t[4]							#
+          find=0							#
+        }								#
+      } else if (match(line,/^ Prefix/) && line ~ p[1]) {		#
+        find=1								#
+      } else if (match(line,/^ from.*/)) {				#
+        if (line ~ src) {						#
+          exit								#
+        } else {							#
+          flags=""							#
+        }								#
+      }									#
+    }									#
+  } END {								#
+    printf "%s", time							#
+  }'
+  return $?
+}
+
+#
+get_ra_routes() {
+  # require get_ra_info() data from STDIN.
+  if [ $# -ne 1 ]; then
+    echo "ERROR: get_ra_routes <ra_source>." 1>&2
+    return 1
+  fi
+  awk -v src="$1" 'BEGIN {						#
+    routes=""								#
+  } {									#
+    while (getline line) {						#
+      if (match(line,/^ Route/)) {					#
+        split(line,r," ")						#
+        routes=routes ","r[3]						#
+      } else if (match(line,/^ from.*/)) {				#
+        if (line ~ src) {						#
+          exit								#
+        } else {							#
+          routes=""							#
+        }								#
+      }									#
+    }									#
+  } END {								#
+    printf "%s", routes							#
+  }'									|
+  sed 's/^,//'
+  return $?
+}
+
+#
+get_ra_route_flag() {
+  # require get_ra_info() data from STDIN.
+  if [ $# -ne 2 ]; then
+    echo "ERROR: get_ra_route_flag <ra_source> <ra_route>." 1>&2
+    return 1
+  fi
+  awk -v src="$1" -v route="$2" 'BEGIN {				#
+    find=0								#
+    flag=""								#
+    split(route,r,"/")							#
+  } {									#
+    while (getline line) {						#
+      if (find==1) {							#
+        if (match(line,/^  Route preference/)) {			#
+          split(line,p," ")						#
+          flag=p[4]							#
+          find=0							#
+        }								#
+      } else if (match(line,/^ Route/) && line ~ r[1]) {		#
+        find=1								#
+      } else if (match(line,/^ from.*/)) {				#
+        if (line ~ src) {						#
+          exit								#
+        } else {							#
+          flag=""							#
+        }								#
+      }									#
+    }									#
+  } END {								#
+    printf "%s", flag							#
+  }'
+  return $?
+}
+
+#
+get_ra_route_ltime() {
+  # require get_ra_info() data from STDIN.
+  if [ $# -ne 2 ]; then
+    echo "ERROR: get_ra_route_ltime <ra_source> <ra_route>." 1>&2
+    return 1
+  fi
+  awk -v src="$1" -v route="$2" 'BEGIN {				#
+    find=0								#
+    time=""								#
+    split(route,r,"/")							#
+  } {									#
+    while (getline line) {						#
+      if (find==1) {							#
+        if (match(line,/^  Route lifetime/)) {				#
+          split(line,t," ")						#
+          time=t[4]							#
+          find=0							#
+        }								#
+      } else if (match(line,/^ Route/) && line ~ r[1]) {		#
+        find=1								#
+      } else if (match(line,/^ from.*/)) {				#
+        if (line ~ src) {						#
+          exit								#
+        } else {							#
+          time=""							#
+        }								#
+      }									#
+    }									#
+  } END {								#
+    printf "%s", time							#
+  }'
+  return $?
+}
+
+#
+get_ra_rdnsses() {
+  # require get_ra_info() data from STDIN.
+  if [ $# -ne 1 ]; then
+    echo "ERROR: get_ra_rdnsses <ra_source>." 1>&2
+    return 1
+  fi
+  awk -v src="$1" 'BEGIN {						#
+    rdnsses=""								#
+  } {									#
+    while (getline line) {						#
+      if (match(line,/^ Recursive DNS server/)) {			#
+        split(line,r," ")						#
+        rdnsses=rdnsses ","r[5]						#
+      } else if (match(line,/^ from.*/)) {				#
+        if (line ~ src) {						#
+          exit								#
+        } else {							#
+          rdnsses=""							#
+        }								#
+      }									#
+    }									#
+  } END {								#
+    printf "%s", rdnsses						#
+  }'									|
+  sed 's/^,//'
+  return $?
+}
+
+#
+get_ra_rdnss_ltime() {
+  # require get_ra_info() data from STDIN.
+  if [ $# -ne 2 ]; then
+    echo "ERROR: get_ra_rdnss_ltime <ra_source> <ra_route>." 1>&2
+    return 1
+  fi
+  awk -v src="$1" -v rdnss="$2" 'BEGIN {				#
+    find=0								#
+    time=""								#
+  } {									#
+    while (getline line) {						#
+      if (find==1) {							#
+        if (match(line,/^  DNS server lifetime/)) {			#
+          split(line,t," ")						#
+          time=t[5]							#
+          find=0							#
+        }								#
+      } else if (match(line,/^ Recursive DNS server/)			\
+                 && line ~ rdnss) {					#
+        find=1								#
+      } else if (match(line,/^ from.*/)) {				#
+        if (line ~ src) {						#
+          exit								#
+        } else {							#
+          time=""							#
+        }								#
+      }									#
+    }									#
+  } END {								#
+    printf "%s", time							#
+  }'
+  return $?
+}
+
+#
+check_v6autoconf() {
+  if [ $# -ne 5 ]; then
+    echo "ERROR: check_v6autoconf <devicename> <v6ifconf> <ra_flags>"	\
+         "<ra_prefix> <ra_prefix_flags>." 1>&2
+    return 1
+  fi
+  local result=1
+  if [ "$2" = "automatic" ]; then
+    local o_flag; local m_flag; local a_flag; local v6addrs
+    local dhcp_data=""
+    o_flag=$(echo "$3" | grep O)
+    m_flag=$(echo "$3" | grep M)
+    v6addrs=$(get_v6addrs "$1" "$4")
+    a_flag=$(echo "$5" | grep A)
+    #
+    rdisc6 -n "$1"
+    if [ -n "$a_flag" ] && [ -n "$v6addrs" ]; then
+      result=0
+    fi
+    if [ -n "$o_flag" ] || [ -n "$m_flag" ]; then
+      if which dhcpcd > /dev/null 2>&1; then
+        dhcp_data=$(dhcpcd -6 -U "$1" | sed "s/'//g")
+      else
+        dhcp_data=$(sed 's/"//g' /var/lib/dhcp/dhclient."$1".leases)
+      fi
+      echo "$dhcp_data"
+    fi
+    if [ -n "$m_flag" ]; then
+      result=$(( result + 2 ))
+      for addr in $(echo "$v6addrs" | sed 's/,/ /g'); do
+        # simple comparision
+        if echo "$dhcp_data"						|
+         grep "dhcp6_ia_na1_ia_addr1=${addr}" > /dev/null 2>&1; then
+          result=0
+        fi
+      done
+    fi
+    return $result
+  fi
+  echo "v6conf is $2"
+  return 0
+}
+
+#
+get_v6addrs() {
+  if [ $# -le 1 ]; then
+    # ra_prefix can be omitted in case of manual configuration.
+    echo "ERROR: get_v6addrs <devicename> <ra_prefix>." 1>&2
+    return 1
+  fi
+  local pref
+  pref=$(echo "$2" | sed -n 's/^\([0-9a-f:]*\):\/.*$/\1/p')
+  ip -6 addr show "$1" scope global					|
+  sed -n "s/^.*inet6 \(${pref}[0-9a-f:]*\)\/.*$/\1/p"			|
+  awk -F\n -v ORS=',' '{print}'						|
+  sed 's/,$//'
+  return $?
+}
+
+#
+get_prefixlen() {
+  if [ $# -ne 1 ]; then
+    echo "ERROR: get_prefixlen <ra_prefix>." 1>&2
+    return 1
+  fi
+  echo "$1"								|
+  awk -F/ '{print $2}'
+  return $?
+}
+
+#
+get_prefixlen_from_ifinfo() {
+  if [ $# -ne 2 ]; then
+    echo "ERROR: get_prefixlen_from_ifinfo <devicename> <v6addr>." 1>&2
+    return 1
+  fi
+  ip -6 addr show "$1" scope global					|
+  grep "$2"								|
+  sed -n "s/^.*inet6 [0-9a-f:]*\/\([0-9]*\).*$/\1/p"
+  return $?
+}
+
+#
+get_v6routers() {
+  if [ $# -ne 1 ]; then
+    echo "ERROR: get_v6routers <devicename>." 1>&2
+    return 1
+  fi
+  ip -6 route show dev "$1"						|
+  sed -n "s/^default via \([0-9a-f:]*\).*$/\1%$1/p"			|
+  uniq									|
+  awk -v ORS=',' '1; END{printf "\n"}'					|
+  sed 's/,$//'
+  return $?
+}
+
+#
+get_v6nameservers() {
+  sed -n 's/^nameserver \([0-9a-f:]*\)$/\1/p' /etc/resolv.conf		|
+  awk -v ORS=',' '1; END{printf "\n"}'					|
+  sed 's/,$//'
+  return $?
+}
+
+#
+check_v6addr() {
+  if [ $# -ne 1 ]; then
+    echo "ERROR: check_v6addr <v6addr>." 1>&2
+    return 1
+  fi
+  # IPv6 address format check (TBD)
+  #if [ ]; then
+    #return 1 
+  #fi
+  if echo "$1"								|
+   grep -e '^::1$' -e '^\(0\+:\)\{7\}0*1$' > /dev/null; then
+    echo 'loopback'
+    return 0
+  elif echo "$1" | grep '^fe80:' > /dev/null; then
+    echo 'linklocal'
+    return 0
+  elif echo "$1" | grep '^fec0:' > /dev/null; then
+    echo 'sitelocal'
+    return 0
+  elif echo "$1" | grep -e '^fc00:' -e '^fd00:' > /dev/null; then
+    echo 'ula'
+    return 0
+  else
+    echo 'global'
+    return 0
+  fi
+}
+
+## for localnet layer
+#
+do_ping() {
+  if [ $# -ne 2 ]; then
+    echo "ERROR: do_ping <version> <target_addr>." 1>&2
+    return 1
+  fi
+  case $1 in
+    "4" ) ping -i 0.2 -c 10 "$2"; return $? ;;
+    "6" ) ping6 -i 0.2 -c 10 "$2"; return $? ;;
+    * ) echo "ERROR: <version> must be 4 or 6." 1>&2; return 9 ;;
+  esac
+}
+
+#
+get_rtt() {
+  # require do_ping() data from STDIN.
+  sed -n 's/^rtt.* \([0-9\.\/]*\) .*$/\1/p'				|
+  sed 's/\// /g'
+  return $?
+}
+
+#
+get_loss() {
+  # require do_ping() data from STDIN.
+  sed -n 's/^.* \([0-9.]*\)\% packet loss.*$/\1/p'
+  return $?
+}
+
+#
+cmdset_ping() {
+  if [ $# -ne 5 ]; then
+    echo "ERROR: cmdset_ping <layer> <version> <target_type>"		\
+         "<target_addr> <count>." 1>&2
+    return 1
+  fi
+  local layer=$1
+  local ver=$2
+  local ipv=IPv${ver}
+  local type=$3
+  local target=$4
+  local count=$5
+  local rtt_type=(min ave max dev)
+  local result=$FAIL
+  local string=" ping to $ipv $type: $target"
+  local ping_result; local rtt_data; local rtt_loss
+
+  if ping_result=$(do_ping "$ver" "$target"); then
+    result=$SUCCESS
+  fi
+  write_json "$layer" "$ipv" "v${ver}alive_${type}" "$result" "$target"	\
+             "$ping_result" "$count"
+  if [ "$result" = "$SUCCESS" ]; then
+    rtt_data=($(echo "$ping_result" | get_rtt))
+    for i in 0 1 2 3; do
+      write_json "$layer" "$ipv" "v${ver}rtt_${type}_${rtt_type[$i]}"	\
+                 "$INFO" "$target" "${rtt_data[$i]}" "$count"
+    done
+    rtt_loss=$(echo "$ping_result" | get_loss)
+    write_json "$layer" "$ipv" "v${ver}loss_${type}" "$INFO" "$target"	\
+               "$rtt_loss" "$count"
+    string="$string\n  status: ok"
+    string="$string, rtt: ${rtt_data[1]} msec, loss: $rtt_loss %"
+  else
+    string="$string\n  status: ng"
+  fi
+  if [ "$VERBOSE" = "yes" ]; then
+    echo -e "$string"
+  fi
+}
+
+## for globalnet layer
+#
+do_traceroute() {
+  if [ $# -ne 2 ]; then
+    echo "ERROR: do_traceroute <version> <target_addr>." 1>&2
+    return 1
+  fi
+  case $1 in
+    "4" ) traceroute -n -I -w 2 -q 1 -m 20 "$2"; return $? ;;
+    "6" ) traceroute6 -n -I -w 2 -q 1 -m 20 "$2"; return $? ;;
+    * ) echo "ERROR: <version> must be 4 or 6." 1>&2; return 9 ;;
+  esac
+}
+
+#
+get_tracepath () {
+  # require do_traceroute() data from STDIN.
+  grep -v traceroute							|
+  awk '{print $2}'							|
+  awk -F\n -v ORS=',' '{print}'						|
+  sed 's/,$//'
+  return $?
+}
+
+#
+do_pmtud() {
+  if [ $# -ne 4 ]; then
+    echo "ERROR: do_pmtud <version> <target_addr> <min_mtu>"		\
+         "<max_mtu>." 1>&2
+    return 1
+  fi
+  case $1 in
+    "4" ) command="ping -i 0.2 -W 1"; dfopt="-M do"; header=28 ;;
+    "6" ) command="ping6 -i 0.2 -W 1"; dfopt=""; header=48 ;;
+    * ) echo "ERROR: <version> must be 4 or 6." 1>&2; return 9 ;;
+  esac
+  if $command -c 1 "$2" > /dev/null; then
+    echo 0
+    return 1
+  fi
+  local version=$1
+  local target=$2
+  local min=$3
+  local max=$4
+  local mid=$(( ( min + max ) / 2 ))
+  local result=0
+
+  if [ "$min" -eq "$mid" ] || [ "$max" -eq "$mid" ]; then
+    echo "$(( min + header ))"
+    return 0
+  fi
+  if $command -c 1 -s "$mid" "$dfopt" "$target" >/dev/null 2>/dev/null
+  then
+    result=$(do_pmtud "$version" "$target" "$mid" "$max")
+  else
+    result=$(do_pmtud "$version" "$target" "$min" "$mid")
+  fi
+  echo "$result"
+}
+
+#
+cmdset_trace () {
+  if [ $# -ne 5 ]; then
+    echo "ERROR: cmdset_trace <layer> <version> <target_type>"		\
+         "<target_addr> <count>." 1>&2
+    return 1
+  fi
+  local layer=$1
+  local ver=$2
+  local ipv=IPv${ver}
+  local type=$3
+  local target=$4
+  local count=$5
+  local result=$FAIL
+  local string=" traceroute to $ipv $type: $target"
+  local path_result; local path_data
+
+  if path_result=$(do_traceroute "$ver" "$target" | sed 's/\*/-/g'); then
+    result=$SUCCESS
+  fi
+  write_json "$layer" "$ipv" "v${ver}path_detail_${type}" "$INFO"	\
+             "$target" "$path_result" "$count"
+  if [ "$result" = "$SUCCESS" ]; then
+    path_data=$(echo "$path_result" | get_tracepath)
+    write_json "$layer" "$ipv" "v${ver}path_${type}" "$INFO"		\
+               "$target" "$path_data" "$count"
+    string="$string\n  path: $path_data"
+  else
+    string="$string\n  status: ng"
+  fi
+  if [ "$VERBOSE" = "yes" ]; then
+    echo -e "$string"
+  fi
+}
+
+#
+cmdset_pmtud () {
+  if [ $# -ne 6 ]; then
+    echo "ERROR: cmdset_pmtud <layer> <version> <target_type>"		\
+         "<target_addr> <ifmtu> <count>." 1>&2
+    return 1
+  fi
+  local layer=$1
+  local ver=$2
+  local ipv=IPv${ver}
+  local type=$3
+  local target=$4
+  local min_mtu=1200
+  local max_mtu=$5
+  local count=$6
+  local string=" pmtud to $ipv server: $target"
+  local pmtu_result
+
+  pmtu_result=$(do_pmtud "$ver" "$target" "$min_mtu" "$max_mtu")
+  if [ "$pmtu_result" -eq 0 ]; then
+    write_json "$layer" "$ipv" "v${ver}pmtu_${type}" "$INFO" "$target"	\
+               unmeasurable "$count"
+    string="$string\n  pmtu: unmeasurable"
+  else
+    write_json "$layer" "$ipv" "v${ver}pmtu_${type}" "$INFO" "$target"	\
+               "$pmtu_result" "$count"
+    string="$string\n  pmtu: $pmtu_result MB"
+  fi
+  if [ "$VERBOSE" = "yes" ]; then
+    echo -e "$string"
+  fi
+}
+
+## for dns layer
+#
+do_dnslookup() {
+  if [ $# -ne 3 ]; then
+    echo "ERROR: do_dnslookup <nameserver> <query_type>"		\
+         "<target_fqdn>." 1>&2
+    return 1
+  fi
+  dig @"$1" "$3" "$2" +time=1
+  # Dig return codes are:
+  # 0: Everything went well, including things like NXDOMAIN
+  # 1: Usage error
+  # 8: Couldn't open batch file
+  # 9: No reply from server
+  # 10: Internal error
+  return $?
+}
+
+#
+get_dnsans() {
+  # require do_dnslookup() data from STDIN.
+  if [ $# -ne 1 ]; then
+    echo "ERROR: get_dnsans <query_type>." 1>&2
+    return 1
+  fi
+  grep -v -e '^$' -e '^;'						|
+  grep "	$1" -m 1						|
+  awk '{print $5}'
+  return $?
+}
+
+#
+get_dnsttl() {
+  # require do_dnslookup() data from STDIN.
+  if [ $# -ne 1 ]; then
+    echo "ERROR: get_dnsttl <query_type>." 1>&2
+    return 1
+  fi
+  grep -v -e '^$' -e '^;'						|
+  grep "	$1" -m 1						|
+  awk '{print $2}'
+  return $?
+}
+
+#
+get_dnsrtt() {
+  # require do_dnslookup() data from STDIN.
+  sed -n 's/^;; Query time: \([0-9]*\) msec$/\1/p'
+  return $?
+}
+
+#
+check_dns64 () {
+  if [ $# -ne 1 ]; then
+    echo "ERROR: check_dns64 <target_addr>." 1>&2
+    return 1
+  fi
+  local dns_ans
+  dns_ans=$(do_dnslookup "$target" AAAA ipv4only.arpa			|
+          get_dnsans AAAA)
+  if [ -n "$dns_ans" ]; then
+    echo 'yes'
+  else
+    echo 'no'
+  fi
+}
+
+#
+cmdset_dnslookup () {
+  if [ $# -ne 5 ]; then
+    echo "ERROR: cmdset_dnslookup <layer> <version> <target_type>"	\
+         "<target_addr> <count>." 1>&2
+    return 1
+  fi
+  local layer=$1
+  local ver=$2
+  local ipv=IPv${ver}
+  local type=$3
+  local target=$4
+  local dns_result=""
+  local string=" dns lookup for $type record by $ipv nameserver: $target"
+  local dns_ans; local dns_ttl; local dns_rtt
+
+  for fqdn in $(echo "$FQDNS" | sed 's/,/ /g'); do
+    local result=$FAIL
+    string="$string\n  resolve server: $fqdn"
+    if dns_result=$(do_dnslookup "$target" "$type" "$fqdn"); then
+      result=$SUCCESS
+    else
+      stat=$?
+    fi
+    write_json "$layer" "$ipv" "v${ver}dnsqry_${type}_${fqdn}"		\
+               "$result" "$target" "$dns_result" "$count"
+    if [ "$result" = "$SUCCESS" ]; then
+      dns_ans=$(echo "$dns_result" | get_dnsans "$type")
+      write_json "$layer" "$ipv" "v${ver}dnsans_${type}_${fqdn}"	\
+                 "$INFO" "$target" "$dns_ans" "$count"
+      dns_ttl=$(echo "$dns_result" | get_dnsttl "$type")
+      write_json "$layer" "$ipv" "v${ver}dnsttl_${type}_${fqdn}"	\
+                 "$INFO" "$target" "$dns_ttl" "$count"
+      dns_rtt=$(echo "$dns_result" | get_dnsrtt)
+      write_json "$layer" "$ipv" "v${ver}dnsrtt_${type}_${fqdn}"	\
+                 "$INFO" "$target" "$dns_rtt" "$count"
+      string="$string\n   status: ok, result(ttl): $dns_ans($dns_ttl s),"
+      string="$string query time: $dns_rtt ms"
+    else
+      string="$string\n   status: ng ($stat)"
+    fi
+  done
+  if [ "$VERBOSE" = "yes" ]; then
+    echo -e "$string"
+  fi
+}
+
+## for application layer
+#
+do_curl() {
+  if [ $# -ne 2 ]; then
+    echo "ERROR: do_curl <version> <target_url>." 1>&2
+    return 1
+  fi
+  if [ "$1" != 4 ] && [ "$1" != 6 ]; then
+    echo "ERROR: <version> must be 4 or 6." 1>&2
+    return 9
+  fi
+  curl -"$1" -L --connect-timeout 5 --write-out %{http_code} --silent	\
+       --output /dev/null "$2"
+  return $?
+}
+
+#
+cmdset_http () {
+  if [ $# -ne 5 ]; then
+    echo "ERROR: cmdset_http <layer> <version> <target_type>"		\
+         "<target_addr> <count>." 1>&2
+    return 1
+  fi
+  local layer=$1
+  local ver=$2
+  local ipv=IPv${ver}
+  local type=$3
+  local target=$4
+  local count=$5
+  local result=$FAIL
+  local string=" curl to extarnal server: $target by $ipv"
+  local http_ans
+
+  if http_ans=$(do_curl "$ver" "$target"); then
+    result=$SUCCESS
+  else
+    stat=$?
+  fi
+  write_json "$layer" "$ipv" "v${ver}http_${type}" "$result" "$target"	\
+             "$http_ans" "$count"
+  if [ "$result" = "$SUCCESS" ]; then
+    string="$string\n  status: ok, http status code: $http_ans"
+  else
+    string="$string\n  status: ng ($stat)"
+  fi
+  if [ "$VERBOSE" = "yes" ]; then
+    echo -e "$string"
+  fi
+}
+
+#
+do_sshkeyscan() {
+  if [ $# -ne 3 ]; then
+    echo "ERROR: do_sshkeyscan <version> <target> <key_type>." 1>&2	\
+    return 1
+  fi
+  ssh-keyscan -"$1" -T 5 -t "$3" "$2" 2>/dev/null
+  return $?
+}
+
+#
+cmdset_ssh () {
+  if [ $# -ne 5 ]; then
+    echo "ERROR: cmdset_ssh <layer> <version> <target_type>"		\
+         "<target_str> <count>." 1>&2
+    return 1
+  fi
+  local layer=$1
+  local ver=$2
+  local ipv=IPv${ver}
+  local type=$3
+  local target; local key_type
+  target=$(echo "$4" | awk -F_ '{print $1}')
+  key_type=$(echo "$4" | awk -F_ '{print $2}')
+  local count=$5
+  local result=$FAIL
+  local string=" sshkeyscan to extarnal server: $target by $ipv"
+  local ssh_ans
+
+  if ssh_ans=$(do_sshkeyscan "$ver" "$target" "$key_type"); then
+    result=$SUCCESS
+  else
+    stat=$?
+  fi
+  write_json "$layer" "$ipv" "v${ver}ssh_${type}" "$result" "$target"  \
+             "$ssh_ans" "$count"
+  if [ "$result" = "$SUCCESS" ]; then
+    string="$string\n  status: ok"
+  else
+    string="$string\n  status: ng ($stat)"
+  fi
+  if [ "$VERBOSE" = "yes" ]; then
+    echo -e "$string"
+  fi
+}
+
+### ADD speedtest
 do_speedtest () {
   if [ $# -ne 1 ]; then
     echo "ERROR: do_speedtest <target_url>." 1>&2
@@ -151,7 +1671,7 @@ cmdset_speedtest () {
                "$speedtest_ipv4_ul" "$count"
   fi
 }
-### ADD speedtest
+### ADD speedtesot
 
 #
 do_speedindex () {
@@ -1125,4 +2645,5 @@ rm -f "$LOCKFILE"
 echo " done."
 
 exit 0
+
 
