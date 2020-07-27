@@ -15,7 +15,10 @@ const puppeteer = require('puppeteer-core');
 var url = process.argv[2];
 
 (async () => {
-  const browser = await puppeteer.launch({executablePath: '/usr/bin/chromium-browser'});
+  const browser = await puppeteer.launch({
+    executablePath: '/usr/bin/chromium-browser',
+    args: ['--no-sandbox']
+  });
   const page = await browser.newPage();
 
   try {
