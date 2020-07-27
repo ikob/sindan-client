@@ -1,4 +1,4 @@
-#!/biADD speedtest
+#!/bin/bash
 do_speedtest () {
   if [ $# -ne 1 ]; then
     echo "ERROR: do_speedtest <target_url>." 1>&2
