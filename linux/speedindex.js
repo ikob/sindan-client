@@ -20,7 +20,7 @@ var traceJson = process.argv[3];
 
 (async () => {
   const browser = await puppeteer.launch({
-                          executablePath: '/usr/bin/chromium-browser',
+                          executablePath: '/usr/bin/chromium',
                           args: ['--no-sandbox']});
   const page = await browser.newPage();
   await page.setDefaultNavigationTimeout(60000);
