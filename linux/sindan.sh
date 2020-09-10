@@ -1860,12 +1860,12 @@ for param in LOCKFILE MAX_RETRY IFTYPE DEVNAME PING_SRVS PING6_SRVS FQDNS GPDNS4
 done
 
 # Check commands
-for cmd in uuidgen iwgetid iwconfig; do
-  if ! which $cmd > /dev/null 2>&1; then
-    echo "ERROR: $cmd is not found." 1>&2
-    exit 1
-  fi
-done
+#for cmd in uuidgen iwgetid iwconfig; do
+#  if ! which $cmd > /dev/null 2>&1; then
+#    echo "ERROR: $cmd is not found." 1>&2
+#    exit 1
+#  fi
+#done
 
 ####################
 ## Phase 0
