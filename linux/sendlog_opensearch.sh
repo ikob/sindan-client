@@ -68,6 +68,12 @@ curl_opts=(--max-time 30 -s)
 # RSSI (a gauge) becomes values.sindan_wifi_neighbor_rssi_dbm.val; the rest
 # become meta.labels.* -- mirroring perfSONAR's prometheus_node docs so the
 # same Grafana panels apply. _id = campaign+bssid makes re-sends idempotent.
+# NOTE: campaign_uuid is deliberately NOT a label. This is a STATIONARY
+# observation point (a fixed Wi-Fi sensor), so the series is defined by the
+# stable instance ($host = PROM_HOST) + bssid over time -- exporter/Prometheus
+# style. campaign is unique per run (a mobile-SINDAN "trip" concept); as a
+# label it would explode series cardinality. It stays only in _id (not a
+# label) to keep re-sends idempotent.
 read -r -d '' JQ_PROG <<'JQ'
 . as $d
 | (($d.occurred_at | sub(" ";"T")) + "Z") as $ts_iso
@@ -85,8 +91,7 @@ read -r -d '' JQ_PROG <<'JQ'
         host: $host,
         iftype: $d.log_group,
         bssid: .bssid, ssid: .ssid, band: .band, channel: .channel,
-        bandwidth: .bandwidth, security: .security, mode: .mode,
-        campaign: $d.log_campaign_uuid } },
+        bandwidth: .bandwidth, security: .security, mode: .mode } },
     values: { "sindan_wifi_neighbor_rssi_dbm": { val: .rssi } } }
 JQ
 
