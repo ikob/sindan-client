@@ -332,7 +332,13 @@ function get_wlan_environment() {
     return 1
   fi
   echo "BSSID,SSID,Mode,Band,Channel,Bandwidth,Security,RSSI"
-  iw dev "$1" scan                                                      |
+  # "iw dev <if> scan" can hang indefinitely when the Wi-Fi driver wedges
+  # (seen as a stuck "iw dev wlan0 scan" burning CPU). Cap it with timeout so a
+  # wedged scan is killed (SIGTERM, then SIGKILL via -k) instead of blocking the
+  # whole diagnosis loop. Override the limit with WLAN_SCAN_TIMEOUT (seconds).
+  { if command -v timeout >/dev/null 2>&1; then                         \
+      timeout -k 5 "${WLAN_SCAN_TIMEOUT:-30}" iw dev "$1" scan;         \
+    else iw dev "$1" scan; fi; }                                        |
   awk 'BEGIN {
     bssid="";
     ssid="";
