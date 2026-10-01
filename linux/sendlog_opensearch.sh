@@ -23,6 +23,13 @@
 #   OS_AUTH=user:pass                   # Basic auth; empty if IP-whitelisted
 #   OS_INSECURE=yes                     # 'yes' for self-signed TLS (curl -k)
 #   PROM_HOST=                          # optional 'host' label; default $(hostname)
+#   LOG_RETENTION_DAYS=7                # optional; see below
+#
+# Only wlan_environment files are sent (and then deleted); nothing else removes
+# the other log/*.json files in this mode, so files older than
+# LOG_RETENTION_DAYS are deleted at the end of each run. This keeps a week of
+# local results (including failed diagnoses) for inspection without letting the
+# spool grow forever.
 #
 # NOTE: reachability + auth to the OpenSearch REST API is the deployment
 # prerequisite to confirm on the perfSONAR host (the "no auth" ingestion path
@@ -42,6 +49,7 @@ OS_AUTH="${OS_AUTH:-}"
 OS_INSECURE="${OS_INSECURE:-no}"                # 'yes' adds curl -k (self-signed TLS)
 PROM_HOST="${PROM_HOST:-$(hostname)}"
 LOCKFILE="${LOCKFILE_SENDLOG_OS:-/tmp/sindan_sendlog_os.lock}"
+LOG_RETENTION_DAYS="${LOG_RETENTION_DAYS:-7}"
 
 if [ -z "$OS_URL" ]; then
   echo "ERROR: OS_URL is not set in sindan.conf." 1>&2
@@ -95,7 +103,7 @@ read -r -d '' JQ_PROG <<'JQ'
     values: { "sindan_wifi_neighbor_rssi_dbm": { val: .rssi } } }
 JQ
 
-sent=0; kept=0
+sent=0; kept=0; empty=0
 for f in log/sindan_*_wlan_environment_*.json; do
   [ -e "$f" ] || continue
 
@@ -105,15 +113,22 @@ for f in log/sindan_*_wlan_environment_*.json; do
   [ -z "$day" ] && day=$(date -u '+%Y.%m.%d')
   index="${OS_INDEX_PREFIX}-${day}"
 
-  # write_json embeds the CSV in "detail" with RAW newlines, which is invalid
-  # JSON (control chars must be escaped). Fold physical newlines to \n first so
-  # jq can parse it, then run the transform.
-  ndjson=$(awk 'NR==1{printf "%s",$0; next}{printf "\\n%s",$0}' "$f" \
-           | jq -c --arg host "$PROM_HOST" --arg index "$index" "$JQ_PROG" 2>/dev/null)
-  if [ -z "$ndjson" ]; then
-    # empty scan, or LOCAL_NETWORK_PRIVACY=yes replaced detail with 'XXX'
-    echo "warn: no neighbour rows in $f (privacy on, or empty scan) -- kept" 1>&2
+  # write_json embeds "detail" verbatim, without any JSON escaping, so the file
+  # is invalid JSON in two ways: RAW newlines (the CSV rows) and literal
+  # backslashes (iw prints non-printable SSID bytes as \xNN, e.g. for hidden
+  # SSIDs, and \x is not a valid JSON escape). Since write_json never emits
+  # escapes itself, every backslash is literal: double them, and fold physical
+  # newlines to \n, so jq can parse the file. Then run the transform.
+  if ! ndjson=$(awk 'NR==1{gsub(/\\/,"\\\\"); printf "%s",$0; next}
+                     {gsub(/\\/,"\\\\"); printf "\\n%s",$0}' "$f" \
+                | jq -c --arg host "$PROM_HOST" --arg index "$index" "$JQ_PROG" 2>/dev/null); then
+    echo "warn: cannot parse $f -- kept" 1>&2
     kept=$((kept + 1)); continue
+  fi
+  if [ -z "$ndjson" ]; then
+    # Nothing to send: empty scan, or LOCAL_NETWORK_PRIVACY=yes replaced
+    # detail with 'XXX'. Keeping it would only retry it forever.
+    rm -f "$f"; empty=$((empty + 1)); continue
   fi
 
   out=$(printf '%s\n' "$ndjson" | curl "${curl_opts[@]}" \
@@ -131,6 +146,10 @@ for f in log/sindan_*_wlan_environment_*.json; do
   fi
 done
 
+# Retention: drop spool files older than LOG_RETENTION_DAYS.
+expired=$(find log -maxdepth 1 -type f -name '*.json' \
+               -mmin +$((LOG_RETENTION_DAYS * 1440)) -print -delete | wc -l)
+
 rm -f "$LOCKFILE"
-echo "sendlog_opensearch: sent=$sent kept=$kept"
+echo "sendlog_opensearch: sent=$sent kept=$kept empty=$empty expired=$expired"
 exit 0
