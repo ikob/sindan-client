@@ -339,7 +339,17 @@ function get_wlan_environment() {
   { if command -v timeout >/dev/null 2>&1; then                         \
       timeout -k 5 "${WLAN_SCAN_TIMEOUT:-30}" iw dev "$1" scan;         \
     else iw dev "$1" scan; fi; }                                        |
-  awk 'BEGIN {
+  parse_wlan_scan
+  return $?
+}
+
+# Parse "iw dev <if> scan" (or "scan dump") output from stdin into one CSV
+# row per BSS: BSSID,SSID,Mode,Band,Channel,Bandwidth,Security,RSSI (no
+# header). The field separator defaults to "," and can be overridden, e.g.
+# with a tab so that SSIDs containing commas stay intact.
+# parse_wlan_scan [<separator>]
+function parse_wlan_scan() {
+  awk -v sep="${1:-,}" 'BEGIN {
     bssid="";
     ssid="";
     mode="";
@@ -351,7 +361,7 @@ function get_wlan_environment() {
   }
   /^BSS / {
     if (bssid != "") {
-      print bssid","ssid","mode","band","channel","width","security","rssi;
+      print bssid sep ssid sep mode sep band sep channel sep width sep security sep rssi;
     }
     split($2,bssid_parts,"(");
     bssid=bssid_parts[1];
@@ -446,7 +456,7 @@ function get_wlan_environment() {
   }
   END {
     if (bssid != "") {
-      print bssid","ssid","mode","band","channel","width","security","rssi;
+      print bssid sep ssid sep mode sep band sep channel sep width sep security sep rssi;
     }
   }'
   return $?
