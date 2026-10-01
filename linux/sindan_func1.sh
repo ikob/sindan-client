@@ -356,6 +356,7 @@ function parse_wlan_scan() {
     band="";
     channel="";
     width="";
+    secoff="";
     security="Open";
     rssi="";
   }
@@ -370,10 +371,13 @@ function parse_wlan_scan() {
     band="";
     channel="";
     width="";
+    secoff="";
     security="Open";
     rssi="";
   }
-  /SSID:/ {
+  # Anchored: the OWE Transition Mode element of a hidden BSS carries its
+  # companion as indented "BSSID:"/"SSID:" lines, which must not match.
+  /^\tSSID:/ {
     if (ssid == "") {
       $1="";
       ssid=substr($0,2);
@@ -403,12 +407,19 @@ function parse_wlan_scan() {
   /DS Parameter set: channel / {
     channel=$5;
   }
-  /STA channel width: / {
-    width=$5;
+  # HT operation: 40 MHz only if a secondary channel is in use.
+  /secondary channel offset: / {
+    secoff=$5;
   }
-  /channel width: / {
-    split($5,width_parts,"(");
-    width=width_parts[2];
+  /STA channel width: / {
+    width=($5 == "any" && (secoff == "above" || secoff == "below")) ? "40" : "20";
+  }
+  # VHT operation: 0 means "as HT" (keep the width above), else 80/160/80+80.
+  /\* channel width: / {
+    if ($4 != "0") {
+      split($5,width_parts,"(");
+      width=width_parts[2];
+    }
   }
   /Authentication suites: / {
     split($0,suite_parts,": ");
@@ -421,6 +432,8 @@ function parse_wlan_scan() {
       security="WPA3-Personal";
     } else if (suite == "IEEE 802.1X") {
       security="WPA2-Enterprise";
+    } else if (suite == "OWE") {
+      security="OWE";
     }
   }
   /WPA:/ {
