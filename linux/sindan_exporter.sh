@@ -71,7 +71,10 @@ trap 'rm -f "$tmp"' EXIT
 
 printf '%s\n' "$rows" | awk -F'\t' -v ifname="$WLAN_IF" -v triggered="$triggered" \
                             -v now="$now" -v last_ok="${last_ok:-}" '
-function esc(v) { gsub(/\\/, "\\\\", v); gsub(/"/, "\\\"", v); return v }
+# Label escaping. Backslashes are doubled with "&&" (the match, twice): a
+# "\\\\" replacement yields a single backslash in mawk, which left iw's \xNN
+# (e.g. hidden SSIDs) as an invalid escape and node_exporter dropped the file.
+function esc(v) { gsub(/\\/, "&&", v); gsub(/"/, "\\\"", v); return v }
 BEGIN {
   print "# HELP sindan_wifi_neighbor_rssi_dbm RSSI of a neighbour AP in the latest Wi-Fi scan."
   print "# TYPE sindan_wifi_neighbor_rssi_dbm gauge"
